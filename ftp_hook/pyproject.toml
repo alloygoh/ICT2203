@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "ftphook"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+scapy = "^2.4.5"
+NetfilterQueue = "^1.0.0"
+pyftplib = "^1.5.6"
+
+[tool.poetry.dev-dependencies]
+black = "^22.3.0"
+pyright = "^1.1.252"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
