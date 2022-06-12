@@ -1,3 +1,6 @@
-netfilterqueue==1.0.0; python_version >= "3.6"
-pyftplib==1.5.6
-scapy==2.4.5; (python_version >= "2.7" and python_full_version < "3.0.0") or (python_full_version >= "3.4.0" and python_version < "4")
+netfilterqueue==1.0.0; python_version >= "3.6" \
+    --hash=sha256:507be475d8c9f98834763aacf2f6cfe800b253ccd283f14f3d6f89a4f87a5878
+pyftplib==1.5.6 \
+    --hash=sha256:395b04e48f20a8d6b9790c9877c29db527b0ea7ab804df5a8a75b73cdd76dad4
+scapy==2.4.5; (python_version >= "2.7" and python_full_version < "3.0.0") or (python_full_version >= "3.4.0" and python_version < "4") \
+    --hash=sha256:bc707e3604784496b6665a9e5b2a69c36cc9fb032af4864b29051531b24c8593
