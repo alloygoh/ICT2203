@@ -28,7 +28,8 @@ class LogCredentials:
         if not arp_flag:
             # catch for if process does not exist
             try:
-                pid = check_output(["pgrep", "-f", "ftp_hook.py"]).strip().decode()
+                pid = check_output(["pgrep", "-f", "sudo python ftp_hook.py"]).strip().decode()
+                #pid = check_output(["pgrep", "-f", "sudo python3 ftp_hook.py"]).strip().decode()
                 # ftp_hook to perform re-arp on SIGINT
                 system(f'kill -s INT {pid}') 
             except:
