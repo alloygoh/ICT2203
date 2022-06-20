@@ -32,6 +32,7 @@ class LogCredentials:
                 #pid = check_output(["pgrep", "-f", "sudo python3 ftp_hook.py"]).strip().decode()
                 # ftp_hook to perform re-arp on SIGINT
                 system(f'kill -s INT {pid}') 
+                arp_flag = True
             except:
                 pass
 
