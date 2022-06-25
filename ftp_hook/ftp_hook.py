@@ -425,7 +425,8 @@ def outgoing(packet):
 def ftp_banner_grab():
     try:
         with FTP(ftp_ip) as ftp_connection:
-            return ftp_connection.getwelcome()
+            welcome =  ftp_connection.getwelcome()
+            return " ".join(welcome.split(" ")[1:])
     except Exception:
         pass
     return "(Sibei Secure FTPd 0.0.1)"
