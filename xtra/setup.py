@@ -56,7 +56,7 @@ def main():
                 ]
             )
 
-            print(executable_path)
+            print(f"Compiling {executable_path}")
             command = [
                 "i686-w64-mingw32-gcc",
                 "main.c",
