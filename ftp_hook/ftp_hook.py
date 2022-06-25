@@ -15,7 +15,7 @@ from pyftpdlib.servers import FTPServer
 from scapy.all import ARP, IP, TCP, Ether, send, srp
 
 # Configuration
-mitm_ip = "10.1.1.2"
+mitm_ip = "10.1.1.4"
 gateway_ip = "10.1.1.1"
 ftp_ip = "10.1.2.2"
 target_ip = "10.1.1.3"

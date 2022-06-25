@@ -6,7 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
-PROXY_SERVER = "10.1.1.2:8080"
+PROXY_SERVER = "10.1.1.4:8080"
 FTP_SERVER_IP = "10.1.2.2"
 
 home_dir = str(Path.home())
