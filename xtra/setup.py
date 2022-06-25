@@ -30,7 +30,7 @@ def mirror_ftp_server(ftp_server_ip):
 
 def generate_certificate():
     p = subprocess.Popen(["mitmdump"])
-    time.sleep(5)
+    time.sleep(20)
     p.kill()
     shutil.copy(home_dir + os.path.sep + ".mitmproxy/mitmproxy-ca-cert.p12", "cert.p12")
 
